@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # 要运行的命令
-CMD="conda run -n ma python train_rl.py --config configs/Reach/TD3_JV.yml"
+CMD="conda run -n ma python train_align.py --config configs/Reach/align_JV.yml"
 
 # 同时保持的任务数
-MAX_JOBS=10
+MAX_JOBS=15
 
 while true; do
     # 当前运行的任务数

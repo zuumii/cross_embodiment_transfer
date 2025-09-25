@@ -1,4 +1,4 @@
-# align.py  —— 整体替换本文件
+# align.py  —— 替换整个文件
 
 import pathlib
 import numpy as np
@@ -12,8 +12,6 @@ from td3 import Actor
 # === 新增：MuJoCo / robosuite 的 SEW 可微工具 ===
 import mujoco
 
-
-# ----------------------- 几何：SEW（Torch） -----------------------
 def _normalize_torch(v, eps=1e-9):
     return v / (v.norm(dim=-1, keepdim=True) + eps)
 
@@ -43,8 +41,7 @@ def sigma_from_SEW_torch(S, E, W, ref_dir=(0.0, 1.0, 0.0)):
     sigma = torch.tan(0.5 * theta)     # stereographic，数值稳定
     return sigma, theta
 
-
-# ----------------------- MuJoCo unwrap / Jacobian -----------------------
+# ------- MuJoCo unwrap helpers (robosuite / raw mujoco / other wrappers) -------
 def _unwrap_mj(sim_or_env):
     """
     统一拿原生 mujoco.MjModel / MjData
@@ -52,22 +49,30 @@ def _unwrap_mj(sim_or_env):
       - robosuite env.sim（带 .model/.data，且 model/data 可能再包一层 _model/_data）
       - 直接给 sim 的情况
     """
+    # 如果是 env，就取 env.sim；否则当作 sim 用
     sim = getattr(sim_or_env, "sim", sim_or_env)
+
+    # 取 model / data
     model = getattr(sim, "model", None)
     data  = getattr(sim, "data", None)
+
+    # robosuite 包了一层 _model / _data
     if model is not None:
         model = getattr(model, "_model", model)
     if data is not None:
         data = getattr(data, "_data", data)
+
     if model is None or data is None:
         raise RuntimeError("Cannot unwrap mujoco model/data from the given sim/env object.")
     return model, data
 
 def _mj_forward(sim_or_env):
+    import mujoco
     m, d = _unwrap_mj(sim_or_env)
     mujoco.mj_forward(m, d)
 
 def joint_point_world(sim_or_env, joint_id):
+    import numpy as np
     m, d = _unwrap_mj(sim_or_env)
     jid = int(joint_id)
     bid = int(m.jnt_bodyid[jid])
@@ -77,6 +82,7 @@ def joint_point_world(sim_or_env, joint_id):
     return t + R @ p_local
 
 def analytic_point_jac(sim_or_env, joint_id, arm_vel_cols):
+    import numpy as np, mujoco
     m, d = _unwrap_mj(sim_or_env)
     bid = int(m.jnt_bodyid[joint_id])
     p_world = joint_point_world(sim_or_env, joint_id).astype(np.float64)
@@ -85,9 +91,8 @@ def analytic_point_jac(sim_or_env, joint_id, arm_vel_cols):
     mujoco.mj_jac(m, d, Jp, Jr, p_world, bid)
     return Jp[:, np.array(arm_vel_cols, dtype=int)]
 
-
-# ----------------------- 关节列表 / S-E-W 选择 -----------------------
 def _joint_list_for_arm(env, robot):
+    # 按 qpos 顺序列出 arm 关节
     m = env.sim.model
     idx_raw = robot._ref_joint_pos_indexes
     arm_qpos_set = set(int(i) for i in np.array(idx_raw).ravel())
@@ -116,29 +121,28 @@ def _pick_sew_indices(robot_name, arm_joints):
     mid = max(2, dof // 2)
     return 1, mid, max(dof - 2, 1)
 
-
-# ----------------------- 自定义 autograd：q -> σ（有梯度路径） -----------------------
 class _SEWFromQ_MJ(torch.autograd.Function):
     """
-    输入 q (torch)，内部用 MuJoCo 拿 Jp，几何端用 Torch 求 ∂σ/∂S,E,W，链回得到 ∂σ/∂q。
+    自定义 autograd：输入 q (torch)，内部用 MuJoCo 拿 Jp，
+    几何端用 Torch 拿 ∂σ/∂S,E,W，链回得到 ∂σ/∂q。
     """
     @staticmethod
     def forward(ctx, q, sim_or_env, arm_qpos_addr, arm_vel_cols, sew_jids, ref_dir=(0.0, 1.0, 0.0)):
         device, dtype = q.device, q.dtype
         q_np = q.detach().cpu().numpy().astype(np.float64)
 
-        # 写 qpos 并前向
+        # ---- 用原生 m,d 写 qpos 并前向 ----
         m, d = _unwrap_mj(sim_or_env)
         d.qpos[np.array(arm_qpos_addr, dtype=int)] = q_np
+        import mujoco
         mujoco.mj_forward(m, d)
 
-        # 三个关键点世界坐标
+        # ---- 三个关键点世界坐标 ----
         jid_S, jid_E, jid_W = sew_jids
         S_np = joint_point_world(sim_or_env, jid_S)
         E_np = joint_point_world(sim_or_env, jid_E)
         W_np = joint_point_world(sim_or_env, jid_W)
 
-        # 几何端梯度
         with torch.enable_grad():
             S = torch.tensor(S_np, device=device, dtype=dtype, requires_grad=True)
             E = torch.tensor(E_np, device=device, dtype=dtype, requires_grad=True)
@@ -147,7 +151,7 @@ class _SEWFromQ_MJ(torch.autograd.Function):
             sigma = sigma.squeeze(0)
             gS, gE, gW = torch.autograd.grad(sigma, [S, E, W], retain_graph=False, create_graph=False)
 
-        # 解析雅可比（切 arm 列）
+        # ---- 解析雅可比（切 arm 列）----
         J_S = torch.from_numpy(analytic_point_jac(sim_or_env, jid_S, arm_vel_cols)).to(device=device, dtype=dtype)
         J_E = torch.from_numpy(analytic_point_jac(sim_or_env, jid_E, arm_vel_cols)).to(device=device, dtype=dtype)
         J_W = torch.from_numpy(analytic_point_jac(sim_or_env, jid_W, arm_vel_cols)).to(device=device, dtype=dtype)
@@ -305,14 +309,12 @@ class ObsAligner:
         # === 新增（可选）：不给也能跑 ===
         src_env=None,
         tgt_env=None,
-        lmbd_sew=0.0,              # SEW 权重；0 关闭
+        lmbd_sew=0.0,              # 默认 0，不改变原行为；想打开 SEW 对齐就传 >0
         ref_dir=(0.0, 1.0, 0.0),
         src_qpos_slice=None,       # 例如 [start, length]；不填则默认“前 dof 个”
         tgt_qpos_slice=None,
-        # === 新增：加速参数 ===
-        sew_max_batch=64,          # 每个 step 计算 SEW 的最大样本数
-        sew_every=1,               # 每几步计算一次 SEW（1 表示每步）
     ):
+        
         self.device = device
         self.lmbd_gp = lmbd_gp
         self.lmbd_cyc = 10
@@ -352,9 +354,6 @@ class ObsAligner:
         self.tgt_sew = None
         self.src_qslice = src_qpos_slice
         self.tgt_qslice = tgt_qpos_slice
-        self.sew_max_batch = int(sew_max_batch)
-        self.sew_every = int(sew_every)
-
         if (src_env is not None) and (tgt_env is not None) and (self.lmbd_sew > 0.0):
             self._init_sew(src_env, tgt_env)
 
@@ -366,9 +365,7 @@ class ObsAligner:
             arm_qpos_addr = [int(i) for i in np.array(robot._ref_joint_pos_indexes).ravel().tolist()]
             arm_vel_cols = [int(i) for i in np.array(robot._ref_joint_vel_indexes).ravel().tolist()]
             joints = _joint_list_for_arm(env, robot)
-            # 机器人名用于 pick 索引（Panda 特殊）
-            robot_name = getattr(getattr(robot, 'robot_model', None), 'naming_prefix', "") or str(type(robot).__name__)
-            s_i, e_i, w_i = _pick_sew_indices(robot_name, joints)
+            s_i, e_i, w_i = _pick_sew_indices(robot.robot_model.naming_prefix if hasattr(robot, 'robot_model') else "", joints)
             return {
                 "sim_or_env": env,
                 "dof": dof,
@@ -423,57 +420,11 @@ class ObsAligner:
         gradient_penalty = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
         return gradient_penalty
 
-    # ----------------------- σ 批量计算（带快路径） -----------------------
-    def _sigma_batch(self, which_env, Q, need_grad: bool):
-        """
-        which_env: "src" | "tgt"
-        Q: [B, dof]
-        need_grad: True  -> 带梯度（调用 _SEWFromQ_MJ + mj_jac）
-                   False -> 无梯度快路径（只 forward + 几何）
-        """
-        assert which_env in ("src", "tgt")
-        cfg = self.src_sew if which_env == "src" else self.tgt_sew
-        assert cfg is not None, f"{which_env}_sew not initialized"
-
-        sim_or_env   = cfg.get("sim_or_env", cfg.get("env", cfg.get("sim")))
-        arm_qpos_addr = cfg["arm_qpos_addr"]
-        arm_vel_cols  = cfg["arm_vel_cols"]
-        sew_jids      = cfg["sew_jids"]
-
-        sigmas = []
-        B = Q.shape[0]
-        for i in range(B):
-            q_i = Q[i]
-            if need_grad and q_i.requires_grad:
-                # 有梯度路径：double 更稳
-                q_i64 = q_i.to(torch.float64)
-                sigma_i = sigma_from_q_once(
-                    sim_or_env, q_i64, arm_qpos_addr, arm_vel_cols, sew_jids,
-                    ref_dir=self.ref_dir
-                )
-                sigmas.append(sigma_i.to(dtype=Q.dtype).squeeze(0))
-            else:
-                # 无梯度快路径：不调用 mj_jac，不建计算图
-                with torch.no_grad():
-                    q_np = q_i.detach().cpu().numpy().astype(np.float64)
-                    m, d = _unwrap_mj(sim_or_env)
-                    d.qpos[np.array(arm_qpos_addr, dtype=int)] = q_np
-                    mujoco.mj_forward(m, d)
-                    S = joint_point_world(sim_or_env, sew_jids[0])
-                    E = joint_point_world(sim_or_env, sew_jids[1])
-                    W = joint_point_world(sim_or_env, sew_jids[2])
-                    S_t = torch.tensor(S, device=Q.device, dtype=Q.dtype).view(1,3)
-                    E_t = torch.tensor(E, device=Q.device, dtype=Q.dtype).view(1,3)
-                    W_t = torch.tensor(W, device=Q.device, dtype=Q.dtype).view(1,3)
-                    sigma_val, _ = sigma_from_SEW_torch(S_t, E_t, W_t, ref_dir=self.ref_dir)
-                    sigmas.append(sigma_val.squeeze(0))
-        return torch.stack(sigmas, dim=0)
-
-    # ----------------------- 训练循环（判别器） -----------------------
     def update_disc(self, src_obs, src_act, tgt_obs, tgt_act, L, step):
         """
         Discriminator tries to separate source and target latent states and actions
         """
+        
         fake_lat_obs = self.tgt_obs_enc(tgt_obs).detach()
         real_lat_obs = self.src_obs_enc(src_obs).detach()
         lat_disc_loss = self.lat_disc(fake_lat_obs).mean() - self.lat_disc(real_lat_obs).mean()
@@ -506,13 +457,46 @@ class ObsAligner:
             L.add_scalar('train_lat_disc/src_gp', src_gp.item(), step)
             L.add_scalar('train_lat_disc/tgt_disc_loss', tgt_disc_loss.item(), step)
             L.add_scalar('train_lat_disc/tgt_gp', tgt_gp.item(), step)
+            L.add_scalar('train_lat_disc/real_lat_obs_sq', (real_lat_obs**2).mean().item(), step)
+            L.add_scalar('train_lat_disc/fake_lat_obs_sq', (fake_lat_obs**2).mean().item(), step)
 
-    # ----------------------- 训练循环（生成器 + SEW） -----------------------
+    def _sigma_batch(self, which_env, Q):
+        """
+        逐样本计算 sigma（支持反传）。
+        which_env: "src" 或 "tgt"
+        Q: [B, dof] torch（可带梯度）
+        返回: [B] torch
+        """
+        assert which_env in ("src", "tgt")
+        cfg = self.src_sew if which_env == "src" else self.tgt_sew
+
+        # 兼容：cfg 里可能存的是 env 或 sim；sigma_from_q_once 内部会统一拆成 (m,d)
+        sim_or_env   = cfg.get("sim_or_env", cfg.get("env", cfg.get("sim")))
+        arm_qpos_addr = cfg["arm_qpos_addr"]
+        arm_vel_cols  = cfg["arm_vel_cols"]
+        sew_jids      = cfg["sew_jids"]
+
+        sigmas = []
+        # 注意：MuJoCo sim 是状态机，不支持并行，这里逐条调用
+        for i in range(Q.shape[0]):
+            q_i = Q[i]
+            # 用 double 稳定数值（计算图仍然连通，梯度会经由 dtype cast 回传到 Q）
+            q_i64 = q_i.to(torch.float64)
+            sigma_i = sigma_from_q_once(
+                sim_or_env, q_i64, arm_qpos_addr, arm_vel_cols, sew_jids,
+                ref_dir=self.ref_dir
+            )
+            # 回到网络 dtype，保持一致
+            sigmas.append(sigma_i.to(dtype=Q.dtype).squeeze(0))
+
+        return torch.stack(sigmas, dim=0)
+
     def update_gen(self, src_obs, src_act, src_next_obs, tgt_obs, tgt_act, tgt_next_obs, L, step):
         """
-        Generator updates + 嵌入 SEW 对齐（cross/self），带加速。
+        Generator outputs more realistic latent states from target samples
         """
-        # --- GAN 主损失（与原版一致）---
+
+        # Generator
         fake_lat_obs = self.tgt_obs_enc(tgt_obs)
         lat_gen_loss = -self.lat_disc(fake_lat_obs).mean()
 
@@ -524,50 +508,35 @@ class ObsAligner:
 
         gen_loss = lat_gen_loss + src_gen_loss + tgt_gen_loss
 
-        # --- Cycle（与原版一致）---
+        # Cycle consistency
         pred_src_obs = self.src_obs_dec(self.tgt_obs_enc(real_tgt_obs))
         pred_tgt_obs = self.tgt_obs_dec(self.src_obs_enc(fake_src_obs))
         cycle_loss = F.l1_loss(pred_src_obs, src_obs) + F.l1_loss(pred_tgt_obs, tgt_obs)
 
-        # --- Dynamics（与原版一致）---
+        # Latent dynamics
         fake_lat_next_obs = self.tgt_obs_enc(tgt_next_obs)
         pred_act = self.inv_dyn(torch.cat([fake_lat_obs, fake_lat_next_obs], dim=-1))
         inv_loss = F.mse_loss(pred_act, tgt_act)
-        pred_lat_next_obs = self.fwd_dyn(torch.cat([fake_lat_obs, fake_lat_obs.detach()], dim=-1))  # 保持原结构；如需严格原式可还原
-        # 为保持与你原始代码一致，可改成：
-        # pred_lat_next_obs = self.fwd_dyn(torch.cat([fake_lat_obs, self.tgt_act_enc(torch.cat([tgt_obs, tgt_act], dim=-1))], dim=-1))
+        pred_lat_next_obs = self.fwd_dyn(torch.cat([fake_lat_obs, tgt_act], dim=-1))
         fwd_loss = F.mse_loss(pred_lat_next_obs, fake_lat_next_obs)
 
-        # --- 新增：SEW 对齐（cross + self）——子采样 + 降频 + 快路径 ---
+        # === 新增：SEW 对齐损失 ===
         sew_loss = torch.tensor(0.0, device=self.device)
-        if (self.lmbd_sew > 0.0) and (self.src_sew is not None) and (self.tgt_sew is not None) \
-           and (step % max(1, self.sew_every) == 0):
-
-            B = src_obs.shape[0]
-            if B > self.sew_max_batch:
-                idx = torch.randperm(B, device=src_obs.device)[:self.sew_max_batch]
-                src_obs_sew = src_obs[idx]; tgt_obs_sew = tgt_obs[idx]
-                real_tgt_obs_sew = real_tgt_obs[idx]
-                pred_tgt_obs_sew = pred_tgt_obs[idx]
-            else:
-                src_obs_sew = src_obs; tgt_obs_sew = tgt_obs
-                real_tgt_obs_sew = real_tgt_obs; pred_tgt_obs_sew = pred_tgt_obs
-
+        if (self.lmbd_sew > 0.0) and (self.src_sew is not None) and (self.tgt_sew is not None):
             # Cross：σ( D_tgt( E_src(src) ) ) ≈ σ( src )
-            q_src        = self._extract_q(src_obs_sew, which="src")
-            q_tgt_from_s = self._extract_q(real_tgt_obs_sew, which="tgt")
-            sigma_src        = self._sigma_batch("src", q_src, need_grad=False)          # 快路径（不反传）
-            sigma_tgt_from_s = self._sigma_batch("tgt", q_tgt_from_s, need_grad=True)    # 需梯度（反传到 D_tgt）
-
+            q_src        = self._extract_q(src_obs, which="src")             # [B, dof_src]
+            q_tgt_from_s = self._extract_q(real_tgt_obs, which="tgt")        # [B, dof_tgt]
+            sigma_src        = self._sigma_batch("src", q_src)
+            sigma_tgt_from_s = self._sigma_batch("tgt", q_tgt_from_s)
             L_sew_cross = F.mse_loss(sigma_tgt_from_s, sigma_src)
 
-            # Self（目标域 cycle）：σ( pred_tgt_obs ) ≈ σ( tgt_obs )
-            q_tgt      = self._extract_q(tgt_obs_sew, which="tgt")
-            q_tgt_pred = self._extract_q(pred_tgt_obs_sew, which="tgt")
-            sigma_tgt      = self._sigma_batch("tgt", q_tgt, need_grad=False)            # 快路径
-            sigma_tgt_pred = self._sigma_batch("tgt", q_tgt_pred, need_grad=True)        # 需梯度（反传到 pred_tgt_obs）
-
+            # Cycle（目标域）：σ( pred_tgt_obs ) ≈ σ( tgt_obs )
+            q_tgt      = self._extract_q(tgt_obs, which="tgt")
+            q_tgt_pred = self._extract_q(pred_tgt_obs, which="tgt")
+            sigma_tgt      = self._sigma_batch("tgt", q_tgt)
+            sigma_tgt_pred = self._sigma_batch("tgt", q_tgt_pred)
             L_sew_self = F.mse_loss(sigma_tgt_pred, sigma_tgt)
+
             sew_loss = L_sew_cross + L_sew_self
 
         loss = gen_loss + self.lmbd_cyc * cycle_loss + self.lmbd_dyn * (inv_loss + fwd_loss) + self.lmbd_sew * sew_loss
@@ -585,8 +554,21 @@ class ObsAligner:
             L.add_scalar('train_lat_gen/inv_loss', inv_loss.item(), step)
             L.add_scalar('train_lat_gen/fwd_loss', fwd_loss.item(), step)
             L.add_scalar('train_lat_gen/cycle_loss', cycle_loss.item(), step)
-            if self.lmbd_sew > 0.0 and (step % max(1, self.sew_every) == 0):
+            if self.lmbd_sew > 0.0:
                 L.add_scalar('train_lat_gen/sew_loss', sew_loss.item(), step)
+                L.add_scalar('train_lat_gen/sew_cross', L_sew_cross.item(), step)
+                L.add_scalar('train_lat_gen/sew_self', L_sew_self.item(), step)
+
+            L.add_scalar('train_lat_gen/lat_obs_diff', 
+                F.l1_loss(self.src_obs_enc(tgt_obs), fake_lat_obs), step)
+            src_lat_obs = self.src_obs_enc(src_obs)
+            src_lat_next_obs = self.src_obs_enc(src_next_obs)
+            pred_src_lat_next_obs = self.fwd_dyn(torch.cat([src_lat_obs, src_act], dim=-1))
+            pred_src_act = self.inv_dyn(torch.cat([src_lat_obs, src_lat_next_obs], dim=-1))
+            L.add_scalar('train_lat_gen/src_fwd_loss', 
+                F.mse_loss(src_lat_next_obs, pred_src_lat_next_obs).item(), step)
+            L.add_scalar('train_lat_gen/src_inv_loss',
+                F.mse_loss(src_act, pred_src_act).item(), step)
 
 
 class ObsActAligner(ObsAligner):
@@ -607,14 +589,11 @@ class ObsActAligner(ObsAligner):
         ref_dir=(0.0, 1.0, 0.0),
         src_qpos_slice=None,
         tgt_qpos_slice=None,
-        sew_max_batch=64,
-        sew_every=1,
     ):
         super().__init__(src_agent, tgt_agent, device, n_layers=n_layers, 
             hidden_dim=hidden_dim, lr=lr, lmbd_gp=lmbd_gp, log_freq=log_freq,
             src_env=src_env, tgt_env=tgt_env, lmbd_sew=lmbd_sew, ref_dir=ref_dir,
-            src_qpos_slice=src_qpos_slice, tgt_qpos_slice=tgt_qpos_slice,
-            sew_max_batch=sew_max_batch, sew_every=sew_every)
+            src_qpos_slice=src_qpos_slice, tgt_qpos_slice=tgt_qpos_slice)
 
         assert src_agent.lat_act_dim == tgt_agent.lat_act_dim
         self.lat_act_dim = src_agent.lat_act_dim
@@ -639,10 +618,13 @@ class ObsActAligner(ObsAligner):
         self.src_disc_opt = torch.optim.Adam(self.src_disc.parameters(), lr=lr)
         self.tgt_disc_opt = torch.optim.Adam(self.tgt_disc.parameters(), lr=lr)
 
+    # 其余函数重用父类版（包括带 SEW 的 update_gen）
+    
     def update_disc(self, src_obs, src_act, tgt_obs, tgt_act, L, step):
         """
         与你原始版本一致：判别器看 (lat_obs, lat_act) 拼接
         """
+        # latent 编码（不求导）
         fake_lat_obs = self.tgt_obs_enc(tgt_obs).detach()
         fake_lat_act = self.tgt_act_enc(torch.cat([tgt_obs, tgt_act], dim=-1)).detach()
         real_lat_obs = self.src_obs_enc(src_obs).detach()
@@ -652,6 +634,7 @@ class ObsActAligner(ObsAligner):
         real_lat_input = torch.cat([real_lat_obs, real_lat_act], dim=-1)
         lat_disc_loss = self.lat_disc(fake_lat_input).mean() - self.lat_disc(real_lat_input).mean()
 
+        # 回到各自观测空间上的判别
         fake_src_obs = self.src_obs_dec(fake_lat_obs).detach()
         fake_src_act = self.src_act_dec(torch.cat([fake_src_obs, fake_lat_act], dim=-1)).detach()
         fake_src_input = torch.cat([fake_src_obs, fake_src_act], dim=-1)
@@ -664,6 +647,7 @@ class ObsActAligner(ObsAligner):
         tgt_input = torch.cat([tgt_obs, tgt_act], dim=-1)
         tgt_disc_loss = self.tgt_disc(real_tgt_input).mean() - self.tgt_disc(tgt_input).mean()
 
+        # WGAN-GP
         lat_gp = self.compute_gradient_penalty(self.lat_disc, real_lat_input, fake_lat_input)
         src_gp = self.compute_gradient_penalty(self.src_disc, src_input, fake_src_input)
         tgt_gp = self.compute_gradient_penalty(self.tgt_disc, tgt_input, real_tgt_input)
@@ -686,11 +670,12 @@ class ObsActAligner(ObsAligner):
             L.add_scalar('train_lat_disc/tgt_disc_loss', tgt_disc_loss.item(), step)
             L.add_scalar('train_lat_disc/tgt_gp', tgt_gp.item(), step)
 
+            
     def update_gen(self, src_obs, src_act, src_next_obs, tgt_obs, tgt_act, tgt_next_obs, L, step):
         """
-        保持原 ObsActAligner.update_gen 结构 + 嵌入 SEW（子采样/降频/快路径）
+        与你原始 ObsActAligner.update_gen 等价 + 嵌入 SEW 对齐两项（cross/self）
         """
-        # --- GAN 主损失 ---
+        # --- GAN 主损失（与原版一致）---
         fake_lat_obs = self.tgt_obs_enc(tgt_obs)
         fake_lat_act = self.tgt_act_enc(torch.cat([tgt_obs, tgt_act], dim=-1))
         real_lat_obs = self.src_obs_enc(src_obs)
@@ -714,7 +699,7 @@ class ObsActAligner(ObsAligner):
 
         gen_loss = lat_gen_loss + src_gen_loss + tgt_gen_loss
 
-        # --- Cycle 一致性 ---
+        # --- Cycle（与原版一致）---
         fake_lat_obs_1 = self.src_obs_enc(fake_src_obs)
         fake_lat_act_1 = self.src_act_enc(torch.cat([fake_src_obs, fake_src_act], dim=-1))
         pred_tgt_obs = self.tgt_obs_dec(fake_lat_obs_1)
@@ -730,7 +715,7 @@ class ObsActAligner(ObsAligner):
         src_act_cycle_loss = F.l1_loss(pred_src_act, src_act)
         cycle_loss = tgt_obs_cycle_loss + tgt_act_cycle_loss + src_obs_cycle_loss + src_act_cycle_loss
 
-        # --- Dynamics ---
+        # --- Dynamics（与原版一致）---
         fake_lat_next_obs = self.tgt_obs_enc(tgt_next_obs)
         pred_lat_act = self.inv_dyn(torch.cat([fake_lat_obs, fake_lat_next_obs], dim=-1))
         pred_act = self.tgt_act_dec(torch.cat([tgt_obs, pred_lat_act], dim=-1))
@@ -738,32 +723,21 @@ class ObsActAligner(ObsAligner):
         pred_lat_next_obs = self.fwd_dyn(torch.cat([fake_lat_obs, fake_lat_act], dim=-1))
         fwd_loss = F.mse_loss(pred_lat_next_obs, fake_lat_next_obs)
 
-        # --- SEW（子采样 + 降频 + 快路径）---
+        # --- 新增：SEW 对齐（cross + self）---
         sew_loss = torch.tensor(0.0, device=self.device)
-        if (self.lmbd_sew > 0.0) and (self.src_sew is not None) and (self.tgt_sew is not None) \
-           and (step % max(1, self.sew_every) == 0):
-
-            B = src_obs.shape[0]
-            if B > self.sew_max_batch:
-                idx = torch.randperm(B, device=src_obs.device)[:self.sew_max_batch]
-                src_obs_sew = src_obs[idx]; tgt_obs_sew = tgt_obs[idx]
-                real_tgt_obs_sew = real_tgt_obs[idx]; pred_tgt_obs_sew = pred_tgt_obs[idx]
-            else:
-                src_obs_sew = src_obs; tgt_obs_sew = tgt_obs
-                real_tgt_obs_sew = real_tgt_obs; pred_tgt_obs_sew = pred_tgt_obs
-
-            # Cross
-            q_src        = self._extract_q(src_obs_sew, which="src")
-            q_tgt_from_s = self._extract_q(real_tgt_obs_sew, which="tgt")
-            sigma_src        = self._sigma_batch("src", q_src, need_grad=False)
-            sigma_tgt_from_s = self._sigma_batch("tgt", q_tgt_from_s, need_grad=True)
+        if (self.lmbd_sew > 0.0) and (self.src_sew is not None) and (self.tgt_sew is not None):
+            # Cross: σ( D_tgt(E_src(src)) ) ≈ σ(src)
+            q_src        = self._extract_q(src_obs, which="src")              # 还原 q
+            q_tgt_from_s = self._extract_q(real_tgt_obs, which="tgt")
+            sigma_src        = self._sigma_batch("src", q_src)                # [B]
+            sigma_tgt_from_s = self._sigma_batch("tgt", q_tgt_from_s)         # [B]
             L_sew_cross = F.mse_loss(sigma_tgt_from_s, sigma_src)
 
-            # Self
-            q_tgt      = self._extract_q(tgt_obs_sew, which="tgt")
-            q_tgt_pred = self._extract_q(pred_tgt_obs_sew, which="tgt")
-            sigma_tgt      = self._sigma_batch("tgt", q_tgt, need_grad=False)
-            sigma_tgt_pred = self._sigma_batch("tgt", q_tgt_pred, need_grad=True)
+            # Self (目标域cycle): σ(pred_tgt_obs) ≈ σ(tgt_obs)
+            q_tgt      = self._extract_q(tgt_obs, which="tgt")
+            q_tgt_pred = self._extract_q(pred_tgt_obs, which="tgt")
+            sigma_tgt      = self._sigma_batch("tgt", q_tgt)
+            sigma_tgt_pred = self._sigma_batch("tgt", q_tgt_pred)
             L_sew_self = F.mse_loss(sigma_tgt_pred, sigma_tgt)
 
             sew_loss = L_sew_cross + L_sew_self
@@ -787,5 +761,5 @@ class ObsActAligner(ObsAligner):
             L.add_scalar('train_lat_gen/inv_loss', inv_loss.item(), step)
             L.add_scalar('train_lat_gen/fwd_loss', fwd_loss.item(), step)
             L.add_scalar('train_lat_gen/cycle_loss', cycle_loss.item(), step)
-            if self.lmbd_sew > 0.0 and (step % max(1, self.sew_every) == 0):
+            if self.lmbd_sew > 0.0:
                 L.add_scalar('train_lat_gen/sew_loss', sew_loss.item(), step)
