@@ -22,7 +22,7 @@ src_buffer: human_demonstrations/Reach/Panda/JOINT_VELOCITY
 tgt_buffer: human_demonstrations/Reach/Sawyer/JOINT_VELOCITY
 lat_obs_dim: 4
 lat_act_dim: 4
-tgt_align_timesteps: 200000
+tgt_align_timesteps: 40000
 batch_size: 512
 src_model_dir: logs/09.20.2025/19-31-16_Reach_Panda_JOINT_VELOCITY_BC/models/step_0180000
 seed: 42
