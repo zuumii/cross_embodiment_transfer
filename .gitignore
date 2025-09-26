@@ -6,6 +6,8 @@ cat > .gitignore << 'EOF'
 human_demonstrations/
 logs/
 renders/
+run_cfgs/
+run_logs/
 
 # 常见无用文件（可选）
 __pycache__/
