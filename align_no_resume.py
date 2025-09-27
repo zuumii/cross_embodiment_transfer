@@ -1,3 +1,5 @@
+# align.py  —— 整体替换本文件
+
 import pathlib
 import numpy as np
 import torch
@@ -81,8 +83,7 @@ def analytic_point_jac(sim_or_env, joint_id, arm_vel_cols):
     Jp = np.zeros((3, m.nv), dtype=np.float64)
     Jr = np.zeros((3, m.nv), dtype=np.float64)
     mujoco.mj_jac(m, d, Jp, Jr, p_world, bid)
-    cols = arm_vel_cols if isinstance(arm_vel_cols, np.ndarray) else np.array(arm_vel_cols, dtype=int)
-    return Jp[:, cols]
+    return Jp[:, np.array(arm_vel_cols, dtype=int)]
 
 
 # ----------------------- 关节列表 / S-E-W 选择 -----------------------
@@ -128,9 +129,7 @@ class _SEWFromQ_MJ(torch.autograd.Function):
 
         # 写 qpos 并前向
         m, d = _unwrap_mj(sim_or_env)
-        # 允许 arm_qpos_addr 是 numpy，避免重复转换
-        addr = arm_qpos_addr if isinstance(arm_qpos_addr, np.ndarray) else np.array(arm_qpos_addr, dtype=int)
-        d.qpos[addr] = q_np
+        d.qpos[np.array(arm_qpos_addr, dtype=int)] = q_np
         mujoco.mj_forward(m, d)
 
         # 三个关键点世界坐标
@@ -219,14 +218,14 @@ class ObsAgent(Agent):
         torch.save(self.fwd_dyn.state_dict(), f'{model_dir}/fwd_dyn.pt')
 
     def load(self, model_dir):
-        self.obs_enc.load_state_dict(torch.load(model_dir/'obs_enc.pt', map_location=self.device))
-        self.obs_dec.load_state_dict(torch.load(model_dir/'obs_dec.pt', map_location=self.device))
-        self.fwd_dyn.load_state_dict(torch.load(model_dir/'fwd_dyn.pt', map_location=self.device))
-        self.inv_dyn.load_state_dict(torch.load(model_dir/'inv_dyn.pt', map_location=self.device))
-        self.actor.load_state_dict(torch.load(model_dir/'actor.pt', map_location=self.device))
+        self.obs_enc.load_state_dict(torch.load(model_dir/'obs_enc.pt'))
+        self.obs_dec.load_state_dict(torch.load(model_dir/'obs_dec.pt'))
+        self.fwd_dyn.load_state_dict(torch.load(model_dir/'fwd_dyn.pt'))
+        self.inv_dyn.load_state_dict(torch.load(model_dir/'inv_dyn.pt'))
+        self.actor.load_state_dict(torch.load(model_dir/'actor.pt'))
 
     def load_actor(self, model_dir):
-        self.actor.load_state_dict(torch.load(model_dir/'actor.pt', map_location=self.device))
+        self.actor.load_state_dict(torch.load(model_dir/'actor.pt'))
         for p in self.actor.parameters():
             p.requires_grad = False
 
@@ -270,8 +269,8 @@ class ObsActAgent(ObsAgent):
 
     def load(self, model_dir):
         super().load(model_dir)
-        self.act_enc.load_state_dict(torch.load(model_dir/'act_enc.pt', map_location=self.device))
-        self.act_dec.load_state_dict(torch.load(model_dir/'act_dec.pt', map_location=self.device))
+        self.act_enc.load_state_dict(torch.load(model_dir/'act_enc.pt'))
+        self.act_dec.load_state_dict(torch.load(model_dir/'act_dec.pt'))
 
     def sample_action(self, obs, deterministic=False):
         with torch.no_grad():
@@ -375,8 +374,6 @@ class ObsAligner:
                 "dof": dof,
                 "arm_qpos_addr": arm_qpos_addr,
                 "arm_vel_cols": arm_vel_cols,
-                "arm_qpos_addr_np": np.array(arm_qpos_addr, dtype=int),
-                "arm_vel_cols_np": np.array(arm_vel_cols, dtype=int),
                 "sew_jids": (joints[s_i]["jid"], joints[e_i]["jid"], joints[w_i]["jid"]),
             }
         self.src_sew = _pack(src_env)
@@ -438,9 +435,9 @@ class ObsAligner:
         cfg = self.src_sew if which_env == "src" else self.tgt_sew
         assert cfg is not None, f"{which_env}_sew not initialized"
 
-        sim_or_env   = cfg["sim_or_env"]
-        arm_qpos_addr = cfg["arm_qpos_addr_np"]
-        arm_vel_cols  = cfg["arm_vel_cols_np"]
+        sim_or_env   = cfg.get("sim_or_env", cfg.get("env", cfg.get("sim")))
+        arm_qpos_addr = cfg["arm_qpos_addr"]
+        arm_vel_cols  = cfg["arm_vel_cols"]
         sew_jids      = cfg["sew_jids"]
 
         sigmas = []
@@ -460,7 +457,7 @@ class ObsAligner:
                 with torch.no_grad():
                     q_np = q_i.detach().cpu().numpy().astype(np.float64)
                     m, d = _unwrap_mj(sim_or_env)
-                    d.qpos[arm_qpos_addr] = q_np
+                    d.qpos[np.array(arm_qpos_addr, dtype=int)] = q_np
                     mujoco.mj_forward(m, d)
                     S = joint_point_world(sim_or_env, sew_jids[0])
                     E = joint_point_world(sim_or_env, sew_jids[1])
@@ -532,12 +529,13 @@ class ObsAligner:
         pred_tgt_obs = self.tgt_obs_dec(self.src_obs_enc(fake_src_obs))
         cycle_loss = F.l1_loss(pred_src_obs, src_obs) + F.l1_loss(pred_tgt_obs, tgt_obs)
 
-        # --- Dynamics（修正：使用真实动作）---
+        # --- Dynamics（与原版一致）---
         fake_lat_next_obs = self.tgt_obs_enc(tgt_next_obs)
         pred_act = self.inv_dyn(torch.cat([fake_lat_obs, fake_lat_next_obs], dim=-1))
         inv_loss = F.mse_loss(pred_act, tgt_act)
-        # ✅ 恢复为使用动作（与原始实现一致）
-        pred_lat_next_obs = self.fwd_dyn(torch.cat([fake_lat_obs, tgt_act], dim=-1))
+        pred_lat_next_obs = self.fwd_dyn(torch.cat([fake_lat_obs, fake_lat_obs.detach()], dim=-1))  # 保持原结构；如需严格原式可还原
+        # 为保持与你原始代码一致，可改成：
+        # pred_lat_next_obs = self.fwd_dyn(torch.cat([fake_lat_obs, self.tgt_act_enc(torch.cat([tgt_obs, tgt_act], dim=-1))], dim=-1))
         fwd_loss = F.mse_loss(pred_lat_next_obs, fake_lat_next_obs)
 
         # --- 新增：SEW 对齐（cross + self）——子采样 + 降频 + 快路径 ---
@@ -560,15 +558,16 @@ class ObsAligner:
             q_tgt_from_s = self._extract_q(real_tgt_obs_sew, which="tgt")
             sigma_src        = self._sigma_batch("src", q_src, need_grad=False)          # 快路径（不反传）
             sigma_tgt_from_s = self._sigma_batch("tgt", q_tgt_from_s, need_grad=True)    # 需梯度（反传到 D_tgt）
+
             L_sew_cross = F.mse_loss(sigma_tgt_from_s, sigma_src)
 
             # Self（目标域 cycle）：σ( pred_tgt_obs ) ≈ σ( tgt_obs )
             q_tgt      = self._extract_q(tgt_obs_sew, which="tgt")
             q_tgt_pred = self._extract_q(pred_tgt_obs_sew, which="tgt")
             sigma_tgt      = self._sigma_batch("tgt", q_tgt, need_grad=False)            # 快路径
-            sigma_tgt_pred = self._sigma_batch("tgt", q_tgt_pred, need_grad=True)        # 需梯度
-            L_sew_self = F.mse_loss(sigma_tgt_pred, sigma_tgt)
+            sigma_tgt_pred = self._sigma_batch("tgt", q_tgt_pred, need_grad=True)        # 需梯度（反传到 pred_tgt_obs）
 
+            L_sew_self = F.mse_loss(sigma_tgt_pred, sigma_tgt)
             sew_loss = L_sew_cross + L_sew_self
 
         loss = gen_loss + self.lmbd_cyc * cycle_loss + self.lmbd_dyn * (inv_loss + fwd_loss) + self.lmbd_sew * sew_loss

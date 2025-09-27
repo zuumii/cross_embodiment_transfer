@@ -2,7 +2,7 @@ env_name: Reach
 expert_folder: human_demonstrations
 robots: Panda
 controller_type: JOINT_VELOCITY
-total_timesteps: 200000
+total_timesteps: 1000000
 batch_size: 1024
 robot_obs_keys:
   - robot0_joint_pos_cos

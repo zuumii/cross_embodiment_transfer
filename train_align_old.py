@@ -1,4 +1,4 @@
-import os
+
 import pathlib
 import argparse
 import time
@@ -13,137 +13,94 @@ import utils
 import replay_buffer
 from align import ObsActAgent as Agent
 from align import ObsActAligner as Aligner
-import mujoco  # noqa: F401
+import mujoco
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', help='train config file path', required=True)
-    # 想支持命令行覆盖续训目录可放开：
-    # parser.add_argument('--resume_dir', type=str, default=None)
+    # environment
+    parser.add_argument('--config', help='train config file path')
     args = parser.parse_args()
     return args
-
-
-def _make_unique_logdir(base_dir: pathlib.Path, name: str) -> pathlib.Path:
-    """
-    生成不冲突的日志目录：<base>/<name>__pid-XXXX__rand-YYYYYY
-    用于多进程/多 tmux 并发时避免 TensorBoard 文件冲突。
-    """
-    pid = os.getpid()
-    rand = np.random.randint(10**9)
-    unique = f"{name}__pid-{pid}__rand-{rand:09d}"
-    return base_dir / unique
-
 
 def main():
     args = parse_args()
     yaml = YAML(typ='safe')
     params = yaml.load(open(args.config))
 
-    # ========= 读取可选开关（保持向后兼容） =========
-    # 续训（新式 nested 配置：resume: {enabled: true, dir: "..."}）
-    resume_cfg = params.get('resume', {})
-    resume_enabled = bool(resume_cfg.get('enabled', False))
-    resume_dir = resume_cfg.get('dir', None)
-    # 也可支持命令行覆盖：
-    # if args.resume_dir is not None:
-    #     resume_enabled = True
-    #     resume_dir = args.resume_dir
-
-    # SEW（优先读取新式 sew: {enabled, lambda, ...}，否则回退旧字段）
-    sew_cfg = params.get('sew', None)
-    if sew_cfg is not None and sew_cfg.get('enabled', False):
-        lmbd_sew = float(sew_cfg.get('lambda', 0.0))
-        sew_ref_dir = tuple(sew_cfg.get('ref_dir', [0.0, 1.0, 0.0]))
-        src_qpos_slice = sew_cfg.get('src_qpos_slice', params['src_env'].get('qpos_slice', None))
-        tgt_qpos_slice = sew_cfg.get('tgt_qpos_slice', params['tgt_env'].get('qpos_slice', None))
-    else:
-        lmbd_sew = float(params.get('lmbd_sew', 0.0))
-        sew_ref_dir = tuple(params.get('sew_ref_dir', [0.0, 1.0, 0.0]))
-        src_qpos_slice = params['src_env'].get('qpos_slice', None)
-        tgt_qpos_slice = params['tgt_env'].get('qpos_slice', None)
-
     ##################################
     ### CREATE DIRECTORY FOR LOGGING
     ##################################
+
     if params['logdir_prefix'] is None:
         logdir_prefix = pathlib.Path(__file__).parent
     else:
         logdir_prefix = pathlib.Path(params['logdir_prefix'])
-
-    # 时间戳加毫秒，降低碰撞概率
-    ts_hms = time.strftime("%H-%M-%S")
-    ts_ms = f"{int(time.time() * 1000) % 1000:03d}"
     data_path = logdir_prefix / 'logs' / time.strftime("%m.%d.%Y")
-    base_name = '_'.join([
-        f"{ts_hms}.{ts_ms}",
+    logdir = '_'.join([
+        time.strftime("%H-%M-%S"),
         params['env_name'],
         params['src_env']['robot'],
         params['src_env']['controller_type'],
         params['tgt_env']['robot'],
         params['tgt_env']['controller_type'],
-        params['suffix'],
+        params['suffix']
     ])
-    # 强制唯一目录
-    logdir = _make_unique_logdir(data_path, base_name)
-    logdir.mkdir(parents=True, exist_ok=False)
+    logdir = data_path / logdir
     params['logdir'] = str(logdir)
-
     print(params)
 
-    # dump params（把实际 logdir 写进去）
-    import yaml as pyyaml
+    # dump params
+    logdir.mkdir(parents=True, exist_ok=True)
+    import yaml
     with open(logdir / 'params.yml', 'w') as fp:
-        pyyaml.safe_dump(params, fp, sort_keys=False)
+        yaml.safe_dump(params, fp, sort_keys=False)
 
     model_dir = logdir / 'models'
-    model_dir.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(model_dir).mkdir(parents=True, exist_ok=True)
     params['model_dir'] = str(model_dir)
     params['src_model_dir'] = pathlib.Path(params['src_model_dir'])
 
-    # 先创建目录，再初始化 TB writer，避免并发冲突
     logger = SummaryWriter(log_dir=params['logdir'])
 
     ##################################
     ### SETUP ENV, AGENT
     ##################################
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    torch.backends.cudnn.benchmark = True  # 并发/不同输入形状时更快
 
     src_env = utils.make(
-        params['env_name'],
+        params['env_name'], 
         robots=params['src_env']['robot'],
         controller_type=params['src_env']['controller_type'],
-        obs_keys=params['src_env']['robot_obs_keys'],
+        obs_keys=params['src_env']['robot_obs_keys'], 
         seed=params['seed'],
         **params['env_kwargs'],
     )
 
     tgt_env = utils.make(
-        params['env_name'],
+        params['env_name'], 
         robots=params['tgt_env']['robot'],
         controller_type=params['tgt_env']['controller_type'],
-        obs_keys=params['tgt_env']['robot_obs_keys'],
+        obs_keys=params['tgt_env']['robot_obs_keys'], 
         seed=params['seed'],
         **params['env_kwargs'],
     )
 
     src_eval_env = utils.make_robosuite_env(
-        params['env_name'],
+        params['env_name'], 
         robots=params['src_env']['robot'],
         controller_type=params['src_env']['controller_type'],
         **params['env_kwargs'],
     )
 
     tgt_eval_env = utils.make_robosuite_env(
-        params['env_name'],
+        params['env_name'], 
         robots=params['tgt_env']['robot'],
         controller_type=params['tgt_env']['controller_type'],
         **params['env_kwargs'],
     )
 
-    # Agent shapes
+    # Agent
     src_obs = src_eval_env.reset()
     src_robot_obs_shape = np.concatenate([src_obs[k] for k in params['src_env']['robot_obs_keys']]).shape
     src_obj_obs_shape = np.concatenate([src_obs[k] for k in params['src_env']['obj_obs_keys']]).shape
@@ -153,28 +110,27 @@ def main():
 
     assert src_obj_obs_shape[0] == tgt_obj_obs_shape[0]
 
-    # eval envs (robot+obj obs)
     env_params = params['src_env']
     src_eval_env = utils.make(
-        params['env_name'],
+        params['env_name'], 
         robots=env_params['robot'],
         controller_type=env_params['controller_type'],
-        obs_keys=env_params['robot_obs_keys'] + env_params['obj_obs_keys'],
+        obs_keys=env_params['robot_obs_keys']+env_params['obj_obs_keys'], 
         seed=params['seed'],
         **params['env_kwargs'],
     )
 
     env_params = params['tgt_env']
     tgt_eval_env = utils.make(
-        params['env_name'],
+        params['env_name'], 
         robots=env_params['robot'],
         controller_type=env_params['controller_type'],
-        obs_keys=env_params['robot_obs_keys'] + env_params['obj_obs_keys'],
+        obs_keys=env_params['robot_obs_keys']+env_params['obj_obs_keys'], 
         seed=params['seed'],
         **params['env_kwargs'],
     )
 
-    # dims
+
     src_obs_dims = {
         'robot_obs_dim': src_robot_obs_shape[0],
         'obs_dim': src_robot_obs_shape[0] + src_obj_obs_shape[0],
@@ -188,7 +144,11 @@ def main():
 
     src_agent = Agent(src_obs_dims, src_act_dims, device)
     src_agent.load(params['src_model_dir'])
-    src_agent.freeze()
+    src_agent.freeze()              # Freeze source agent
+
+    # src_agent.eval_mode()
+    # utils.evaluate(src_eval_env, src_agent, 10, logger, 0) 
+    # import ipdb; ipdb.set_trace()
 
     tgt_obs_dims = {
         'robot_obs_dim': tgt_robot_obs_shape[0],
@@ -202,47 +162,9 @@ def main():
     }
 
     tgt_agent = Agent(tgt_obs_dims, tgt_act_dims, device)
+    # Load latent policy for target and freeze
+    tgt_agent.load_actor(params['src_model_dir'])       
 
-    # ====== 续训 or 冷启动 ======
-    start_step = 0
-    resume_ckpt_dir = None
-    if resume_enabled and resume_dir is not None:
-        p = pathlib.Path(resume_dir)
-        if p.is_dir():
-            if p.name.startswith('step_'):
-                resume_ckpt_dir = p
-            else:
-                maybe_models = p / 'models'
-                if maybe_models.is_dir():
-                    cands = sorted(
-                        [d for d in maybe_models.iterdir() if d.is_dir() and d.name.startswith('step_')],
-                        key=lambda d: int(d.name.split('_')[-1])
-                    )
-                    if len(cands) > 0:
-                        resume_ckpt_dir = cands[-1]
-        if resume_ckpt_dir is not None:
-            try:
-                tgt_agent.load(resume_ckpt_dir)  # align.Agent.load 里应使用 map_location=self.device
-                try:
-                    prev_step = int(resume_ckpt_dir.name.split('_')[-1])
-                    start_step = prev_step + 1
-                except Exception:
-                    start_step = 0
-                print(f"[Resume] Loaded target agent from: {resume_ckpt_dir} | start_step = {start_step}")
-            except Exception as e:
-                print(f"[Resume] Failed to load from {resume_ckpt_dir}: {e}")
-                print("[Cold-start] Fallback to loading actor from src_model_dir.")
-                tgt_agent.load_actor(params['src_model_dir'])
-        else:
-            print(f"[Resume] No valid checkpoint under: {resume_dir}")
-            print("[Cold-start] Loading actor from src_model_dir.")
-            tgt_agent.load_actor(params['src_model_dir'])
-    else:
-        # 冷启动：只用源域 actor 作为 latent policy 初始化
-        tgt_agent.load_actor(params['src_model_dir'])
-        print("[Cold-start] loaded actor from src_model_dir; enc/dec remain random.")
-
-    # buffers
     src_buffer = replay_buffer.ReplayBuffer(
         obs_shape=src_env.observation_space.shape,
         action_shape=src_env.action_space.shape,
@@ -263,36 +185,26 @@ def main():
     demo_paths = utils.load_episodes(pathlib.Path(params['tgt_buffer']), params['tgt_env']['robot_obs_keys'])
     tgt_buffer.add_rollouts(demo_paths)
 
-    # 传入含 sim 的 eval env（只用 sim，不影响观测）
+    # 这里传“含 sim 的 env”，我用你后面重新创建的 eval env（带 robot_obs+obj_obs 也没关系，我们只用 sim）
     aligner = Aligner(
         src_agent, tgt_agent, device,
         log_freq=10,
-        src_env=src_eval_env,
+        src_env=src_eval_env,            # 需要 sim
         tgt_env=tgt_eval_env,
-        lmbd_sew=lmbd_sew,                 # 0.0 则完全关闭 SEW
-        ref_dir=sew_ref_dir,
-        src_qpos_slice=src_qpos_slice,
-        tgt_qpos_slice=tgt_qpos_slice,
+        lmbd_sew=params.get('lmbd_sew', 0.5),           # 没配就默认 0.5
+        ref_dir=tuple(params.get('sew_ref_dir', [0., 1., 0.])),
+        src_qpos_slice=params['src_env'].get('qpos_slice', None),  # 若你的 robot_obs 里关节角不在前 dof，可以配切片
+        tgt_qpos_slice=params['tgt_env'].get('qpos_slice', None),
     )
-    if resume_enabled:
-        print(f"[Eval] Initial evaluation before resuming from step {start_step}")
-        tgt_agent.eval_mode()
-        utils.evaluate(tgt_eval_env, tgt_agent, 4, logger, step=start_step)
-        tgt_agent.train_mode()
-        
-    total_steps = params['tgt_align_timesteps']
-    end_step = start_step + total_steps
-
-    for step in range(start_step, end_step):
+    for step in range(params['tgt_align_timesteps']):
         for _ in range(5):
             src_obs, src_act, _, src_next_obs, _ = src_buffer.sample()
             tgt_obs, tgt_act, _, tgt_next_obs, _ = tgt_buffer.sample()
             src_act = src_act[:, :-1]
             tgt_act = tgt_act[:, :-1]
             aligner.update_disc(src_obs, src_act, tgt_obs, tgt_act, logger, step)
-
-        aligner.update_gen(src_obs, src_act, src_next_obs,
-                           tgt_obs, tgt_act, tgt_next_obs, logger, step)
+        aligner.update_gen(src_obs, src_act, src_next_obs, 
+            tgt_obs, tgt_act, tgt_next_obs, logger, step)     
 
         if step % params['evaluation']['interval'] == 0:
             tgt_agent.eval_mode()
@@ -301,8 +213,9 @@ def main():
 
             print(f"Saving model at step {step}")
             step_dir = model_dir / f"step_{step:07d}"
-            step_dir.mkdir(parents=True, exist_ok=True)
+            pathlib.Path(step_dir).mkdir(parents=True, exist_ok=True)
             tgt_agent.save(step_dir)
+
 
 
 if __name__ == '__main__':

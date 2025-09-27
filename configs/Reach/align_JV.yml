@@ -34,3 +34,16 @@ evaluation:
   save_interval: 20000
 save_freq: 50000
 suffix: align_cycle
+
+# —— 续训（从旧 run 继续）——
+resume:
+  enabled: true           # true 时启用续训
+  dir: logs/09.25.2025/23-37-55_Reach_Panda_JOINT_VELOCITY_Sawyer_JOINT_VELOCITY_align_cycle/models/step_0028000                # 指到旧 run 的 log 根目录，或直接指到 models/step_xxxxxx 目录
+
+# —— SEW 对齐（几何一致性约束）——
+sew:
+  enabled: true           # true 时启用 SEW 损失；false 则完全关闭，零开销
+  lambda: 0.5              # SEW 损失权重（开启时才生效）
+  ref_dir: [0.0, 1.0, 0.0] # 参考方向
+  src_qpos_slice: null     # 可选：[start, length] 若关节角不在 robot_obs 前 dof
+  tgt_qpos_slice: null     # 同上
