@@ -335,7 +335,7 @@ def osc_to_jv(env_name, robots, num_episodes=64, render=False):
         # save_episode(directory, episode)
         # episodes_saved += 1        
 
-        if np.sum(episode['reward']) > 50:
+        if np.sum(episode['reward']) > 120:
             save_episode(directory, episode)
             episodes_saved += 1
         # if jv_env._check_success():
