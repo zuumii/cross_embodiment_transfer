@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ====== 配置项 ======
-CMD='conda run -n ma python train_align.py --config configs/Reach/align_JV.yml'
-MAX_JOBS=3         # 并发数量，按需改 10/12 都行
+CMD='conda run -n ma python train_bc.py --config configs/Reach/BC_JV.yml'
+MAX_JOBS=8         # 并发数量，按需改 10/12 都行
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGDIR="${ROOT}/run_logs"
 mkdir -p "$LOGDIR"

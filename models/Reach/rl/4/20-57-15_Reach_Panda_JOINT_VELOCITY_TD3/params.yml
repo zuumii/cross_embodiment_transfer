@@ -1,0 +1,27 @@
+env_name: Reach
+expert_folder: human_demonstrations
+robots: Panda
+controller_type: JOINT_VELOCITY
+total_timesteps: 1000000
+batch_size: 1024
+robot_obs_keys:
+- robot0_joint_pos_cos
+- robot0_joint_pos_sin
+obj_obs_keys:
+- target_to_robot0_eef_pos
+lat_obs_dim: 4
+lat_act_dim: 4
+env_kwargs:
+  horizon: 200
+  table_full_size:
+  - 0.6
+  - 0.6
+  - 0.05
+evaluation:
+  interval: 10000
+  save_interval: 20000
+seed: 42
+save_buffer: false
+logdir_prefix: null
+suffix: TD3
+logdir: /home/wrx/ma/cross_embodiment_transfer/logs/09.26.2025/20-57-15_Reach_Panda_JOINT_VELOCITY_TD3
