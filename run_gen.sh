@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ====== 配置项 ======
-CMD='conda run -n ma python python3 generate_demos.py --robot Panda'
-MAX_JOBS=8         # 并发数量，按需改 10/12 都行
+CMD='conda run -n ma python generate_demos_Lift.py --robot Panda'
+MAX_JOBS=5         # 并发数量，按需改 10/12 都行
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGDIR="${ROOT}/run_logs"
 mkdir -p "$LOGDIR"

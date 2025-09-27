@@ -1,0 +1,49 @@
+env_name: Reach
+env_kwargs:
+  horizon: 200
+  table_full_size: [0.6, 0.6, 0.05]
+src_env:
+  robot: Panda
+  controller_type: JOINT_VELOCITY
+  robot_obs_keys:
+    - robot0_joint_pos_cos
+    - robot0_joint_pos_sin
+  obj_obs_keys:
+    - target_to_robot0_eef_pos
+tgt_env:
+  robot: Sawyer
+  controller_type: JOINT_VELOCITY
+  robot_obs_keys:
+    - robot0_joint_pos_cos
+    - robot0_joint_pos_sin
+  obj_obs_keys:
+    - target_to_robot0_eef_pos
+src_buffer: human_demonstrations/Reach/Panda/JOINT_VELOCITY
+tgt_buffer: human_demonstrations/Reach/Sawyer/JOINT_VELOCITY
+lat_obs_dim: 4
+lat_act_dim: 4
+tgt_align_timesteps: 40000
+batch_size: 512
+src_model_dir: logs/09.26.2025/20-57-15_Reach_Panda_JOINT_VELOCITY_TD3/models/step_0860000
+seed: 42
+save_buffer: False
+logdir_prefix: null
+log_freq: 1000
+evaluation:
+  interval: 2000
+  save_interval: 20000
+save_freq: 50000
+suffix: align_cycle
+
+# —— 续训（从旧 run 继续）——
+resume:
+  enabled: false           # true 时启用续训
+  dir: logs/09.25.2025/23-37-55_Reach_Panda_JOINT_VELOCITY_Sawyer_JOINT_VELOCITY_align_cycle/models/step_0028000               # 指到旧 run 的 log 根目录，或直接指到 models/step_xxxxxx 目录
+
+# —— SEW 对齐（几何一致性约束）——
+sew:
+  enabled: true           # true 时启用 SEW 损失；false 则完全关闭，零开销
+  lambda: 0.5              # SEW 损失权重（开启时才生效）
+  ref_dir: [0.0, 1.0, 0.0] # 参考方向
+  src_qpos_slice: null     # 可选：[start, length] 若关节角不在 robot_obs 前 dof
+  tgt_qpos_slice: null     # 同上
