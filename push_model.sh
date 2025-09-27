@@ -8,17 +8,19 @@ cd "$REPO_ROOT"
 [[ -d models ]] || { echo "❌ 未找到 models/ 目录"; exit 1; }
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-# 自定义提交信息可作为第一个参数传入
 MSG="${1:-"update(models): $(hostname) $(date -Iseconds)"}"
 
-# 先把远端变更并入本地，减少推送时报错
+# 先同步远端，减少推送时报错（不会 push）
 git fetch --prune
 git pull --rebase --autostash origin "$BRANCH"
 
-# 只添加 models/ 的改动
-git add -A models
+# 关键：清空暂存区，只保留工作区改动（防止误提交其它路径）
+git reset
 
-# 没改动就直接退出
+# 只把 models/ 的新增/修改/删除放入暂存区
+git add -A -- models
+
+# 若 models/ 没变化就退出
 if git diff --cached --quiet; then
   echo "ℹ️ models/ 无改动，跳过提交"
   exit 0
