@@ -38,7 +38,7 @@ suffix: align_cycle
 # —— 续训（从旧 run 继续）——
 resume:
   enabled: true           # true 时启用续训
-  dir: logs/09.25.2025/23-37-55_Reach_Panda_JOINT_VELOCITY_Sawyer_JOINT_VELOCITY_align_cycle/models/step_0028000                # 指到旧 run 的 log 根目录，或直接指到 models/step_xxxxxx 目录
+  dir: logs/09.25.2025/23-37-55_Reach_Panda_JOINT_VELOCITY_Sawyer_JOINT_VELOCITY_align_cycle/models/step_0028000               # 指到旧 run 的 log 根目录，或直接指到 models/step_xxxxxx 目录
 
 # —— SEW 对齐（几何一致性约束）——
 sew:

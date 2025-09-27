@@ -608,7 +608,7 @@ class ObsActAligner(ObsAligner):
         ref_dir=(0.0, 1.0, 0.0),
         src_qpos_slice=None,
         tgt_qpos_slice=None,
-        sew_max_batch=64,
+        sew_max_batch=256,
         sew_every=1,
     ):
         super().__init__(src_agent, tgt_agent, device, n_layers=n_layers, 
