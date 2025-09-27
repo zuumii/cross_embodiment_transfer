@@ -1,6 +1,6 @@
-env_name: Reach
+env_name: Lift
 expert_folder: human_demonstrations
-robots: Sawyer
+robots: Panda
 controller_type: JOINT_VELOCITY
 total_timesteps: 200000
 batch_size: 256
